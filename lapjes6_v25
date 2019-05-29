@@ -1,0 +1,379 @@
+--20181004: elke run eigen telling 
+--werkt 2018-06-15
+CREATE OR REPLACE FUNCTION {0}.rb_lapjes6_v25(
+
+	
+	straal		INTEGER,
+	bgt_tel		TEXT,							--'bgt' of 'tel'
+	run_id		INTEGER
+	
+)
+
+RETURNS void AS
+
+$$
+DECLARE
+	tabel_naam 		TEXT;
+	drpot 		TEXT;
+	drpotjes 	TEXT;
+	straat_p_tabel	TEXT;
+	st 				INTEGER;
+	runidtext		TEXT;
+
+
+
+BEGIN
+
+--FOREACH st IN ARRAY straal LOOP
+	SELECT to_char(run_id, 'fm00') INTO runidtext;
+
+	st = straal;
+
+	--SELECT '{0}.{0}_lapjes_6_r' || st::TEXT || '_run' || runidtext::TEXT INTO tabel_naam;
+	SELECT '{0}.{0}_run' || runidtext::TEXT || '_lapjes_6_r' || st::TEXT INTO tabel_naam;
+	SELECT 'drpot_' || st::TEXT INTO drpot;
+	SELECT 'drpotjes_' || st::TEXT INTO drpotjes;
+
+	CASE
+
+		WHEN bgt_tel = 'bgt' THEN
+
+			SELECT '{0}.{0}_straatparkeerplekken' INTO straat_p_tabel;
+
+		WHEN bgt_tel = 'tel' THEN
+
+			SELECT '{0}.{0}_straatparkeerplekken_telling' INTO straat_p_tabel;
+
+	END CASE;
+
+
+	EXECUTE FORMAT('
+	DROP TABLE IF EXISTS %s;
+	CREATE TEMP TABLE %s AS 
+
+		with
+
+		c AS(
+		SELECT
+		parks.straatnaam,
+		a.id_parks,
+		a.park_bron
+		FROM {0}.telling a 
+		JOIN %s parks
+		ON parks.id = a.id_parks
+		),
+
+		drol as (
+		SELECT
+		straatnaam,
+		ST_Union(ST_Buffer(park_bron, %s)) AS geom 
+		FROM c
+		GROUP BY straatnaam
+		),
+
+		straat_drn as (
+		select
+		ROW_NUMBER () OVER (ORDER BY d.straatnaam) AS id_straat,
+		d.straatnaam,
+		d.l0, d.l1, d.l2, d.l3, d.l4, d.l5, d.l6, d.l7, d.l8, d.l9, d.l10, d.m0, d.m1, d.m2, d.k0, d.k1, d.k2, d.k3, d.k4, d.k5, d.k6,
+		drol.geom as straat_geom
+		from {0}.{0}_run%s_telling d
+		join drol
+		on drol.straatnaam = d.straatnaam
+		),
+
+		lapjes AS(
+
+		SELECT geom AS lapjes FROM ST_Dump((
+		    SELECT ST_Polygonize(the_geom) AS the_geom FROM (
+			SELECT ST_Union(the_geom) AS the_geom FROM (
+			    SELECT ST_ExteriorRing((st_dump(straat_geom)).geom) AS the_geom FROM straat_drn) AS lines
+			) AS noded_lines
+		    )
+		)
+		),
+
+		met_panden AS(  --alleen die lapjes waar zich panden in begeven
+		SELECT
+		distinct ON (l.lapjes)
+		l.lapjes
+		FROM lapjes l
+		JOIN {0}.{0}_panden p
+		ON st_intersects(l.lapjes, p.geom)
+		),
+
+
+		eind as(
+		SELECT
+		d.id_straat,
+		d.straatnaam,
+		d.l0, d.l1, d.l2, d.l3, d.l4, d.l5, d.l6, d.l7, d.l8, d.l9, d.l10, d.m0, d.m1, d.m2, d.k0, d.k1, d.k2, d.k3, d.k4, d.k5, d.k6,
+		d.straat_geom,
+		b.lapjes,
+		st_area(b.lapjes) / st_area(d.straat_geom) AS ratio
+		FROM straat_drn d
+		--cross join lapjes b
+		CROSS JOIN met_panden b
+		WHERE st_area(st_intersection(d.straat_geom, b.lapjes)) > 0.1
+		order by id_straat
+		)
+
+		select * from eind; 
+
+		', drpot, drpot, straat_p_tabel, st, runidtext);
+
+
+	--Nu alle states over de lapjes verdelen, dit keer zonder afrondingen
+	DECLARE 
+		aantal_straat 	INTEGER;
+		straat 			INTEGER;
+		straat_lapjes 	RECORD;
+
+		test 			RECORD;
+		t 				RECORD;
+
+		ratios 			DOUBLE PRECISION[];
+
+	BEGIN
+
+		EXECUTE FORMAT('
+		DROP TABLE IF EXISTS %s;
+
+		CREATE TEMP TABLE %s (
+			id serial PRIMARY KEY NOT NULL,
+			l0 INTEGER DEFAULT 0 , l1 INTEGER DEFAULT 0, l2 INTEGER DEFAULT 0, l3 INTEGER DEFAULT 0, l4 INTEGER DEFAULT 0, l5 INTEGER DEFAULT 0, l6 INTEGER DEFAULT 0, l7 INTEGER DEFAULT 0, 
+			l8 INTEGER DEFAULT 0, l9 INTEGER DEFAULT 0, l10 INTEGER DEFAULT 0, m0 INTEGER DEFAULT 0, m1 INTEGER DEFAULT 0, m2 INTEGER DEFAULT 0, k0 INTEGER DEFAULT 0, k1 INTEGER DEFAULT 0, 
+			k2 INTEGER DEFAULT 0, k3 INTEGER DEFAULT 0, k4 INTEGER DEFAULT 0, k5 INTEGER DEFAULT 0, k6 INTEGER DEFAULT 0, geom GEOMETRY
+		);
+		', drpotjes, drpotjes);
+
+		EXECUTE FORMAT('SELECT DISTINCT max(id_straat) FROM %s', drpot) INTO aantal_straat;
+
+		--RAISE NOTICE 'aantal straat drn %', aantal_straat;
+
+		FOR straat IN 1..(aantal_straat) LOOP
+
+			DECLARE 
+				states 		INTEGER[];
+				drol_temp 	TEXT; 
+				states_a 	TEXT[] default ARRAY['l0', 'l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8', 'l9', 'l10', 'm0', 'm1', 'm2', 'k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6'];
+				i 			INTEGER;
+
+			BEGIN
+				SELECT 'drol_temp' || straat::TEXT INTO drol_temp;
+
+				--RAISE NOTICE 'straat id %', straat;
+				EXECUTE FORMAT('
+				SELECT array[d.l0, d.l1, d.l2, d.l3, d.l4, d.l5, d.l6, d.l7, d.l8, d.l9, d.l10, d.m0, d.m1, d.m2, d.k0, d.k1, d.k2, d.k3, d.k4, d.k5, d.k6]
+				FROM
+					(
+					SELECT 
+					DISTINCT
+					d.l0, d.l1, d.l2, d.l3, d.l4, d.l5, d.l6, d.l7, d.l8, d.l9, d.l10, d.m0, d.m1, d.m2, d.k0, d.k1, d.k2, d.k3, d.k4, d.k5, d.k6
+					FROM %s d WHERE id_straat = %s 
+					) d
+				', drpot, straat) INTO states;
+
+				EXECUTE FORMAT('
+				DROP TABLE IF EXISTS %s;
+
+				CREATE TEMP TABLE %s (
+					id serial PRIMARY KEY NOT NULL,
+					l0 INTEGER DEFAULT 0 , l1 INTEGER DEFAULT 0, l2 INTEGER DEFAULT 0, l3 INTEGER DEFAULT 0, l4 INTEGER DEFAULT 0, l5 INTEGER DEFAULT 0, l6 INTEGER DEFAULT 0, l7 INTEGER DEFAULT 0, 
+					l8 INTEGER DEFAULT 0, l9 INTEGER DEFAULT 0, l10 INTEGER DEFAULT 0, m0 INTEGER DEFAULT 0, m1 INTEGER DEFAULT 0, m2 INTEGER DEFAULT 0, k0 INTEGER DEFAULT 0, k1 INTEGER DEFAULT 0, 
+					k2 INTEGER DEFAULT 0, k3 INTEGER DEFAULT 0, k4 INTEGER DEFAULT 0, k5 INTEGER DEFAULT 0, k6 INTEGER DEFAULT 0, ratio DOUBLE PRECISION, ratio_b DOUBLE PRECISION, geom GEOMETRY
+				);
+				', drol_temp, drol_temp);
+				
+			
+				
+				FOR straat_lapjes in --per straat id de temp tabel  drol_temp vullen
+
+					EXECUTE FORMAT('SELECT ratio, lapjes FROM %s WHERE id_straat = %s', drpot, straat)
+
+				LOOP
+
+					EXECUTE FORMAT('insert INTO %s (ratio_b, geom) VALUES (%s, %L)', drol_temp, straat_lapjes.ratio, straat_lapjes.lapjes);
+
+				END LOOP;
+
+
+				FOR i IN 1..array_length(states, 1) LOOP  --voor elke state van elke straat
+
+					--kopieer ration_backupo * het aantal agents van die state 
+					EXECUTE FORMAT('update %s set ratio = COALESCE(ratio_b * %s)', drol_temp, states[i]);
+
+					DECLARE
+						staat 		INTEGER := states[i];
+						update_id 	INTEGER;
+						--update_row RECORD;
+					BEGIN
+					/*
+					Hieronder worden de agents verdeelt over de sublapjes in de straatdr geometrie. Om afrondings fouten te voorkomen de volgende strategie:
+					Elke state in de straat heeft staat aantal agents. In een while loop wordt bij iedere iteratie 1 state toegekent aan een lap. 
+
+					ratio * aantal agents van die state
+					sorteer ratio kol aflopen
+					verlaag die ratio met 1
+					verhoog de state met 1
+
+					Herhaal dit totdat alle agents op zijn
+
+					*/
+
+						while staat > 0 LOOP
+			
+							EXECUTE FORMAT('SELECT id FROM %s order by ratio desc limit 1', drol_temp) INTO update_id;
+
+							EXECUTE FORMAT('UPDATE %s SET ratio = ratio - 1 WHERE id = %s ', drol_temp, update_id );
+							EXECUTE FORMAT('UPDATE %s SET %s = %s + 1 WHERE id = %s', drol_temp, states_a[i], states_a[i], update_id);
+
+							staat = staat - 1;
+
+						END LOOP;
+
+					
+					END;
+
+				END LOOP;
+				--Hier staat IN drol_temp de straat IN subdrn
+				
+					FOR t IN
+						EXECUTE FORMAT('SELECT * FROM %s order by id', drol_temp) 
+					LOOP
+						 EXECUTE FORMAT('
+						INSERT INTO %s (l0, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, m0, m1, m2, k0, k1, k2, k3, k4, k5, k6, geom) 
+						VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %L);
+						', drpotjes, t.l0, t.l1, t.l2, t.l3, t.l4, t.l5, t.l6, t.l7, t.l8, t.l9, t.l10, t.m0, t.m1, t.m2, t.k0, t.k1, t.k2, t.k3, t.k4, t.k5, t.k6, t.geom);
+							
+										
+
+					END LOOP;
+			
+			END;
+			
+		END LOOP;
+
+
+	/*
+		FOR test IN
+
+			SELECT * FROM drpotjes  
+		LOOP
+			RAISE NOTICE 'temp %', test;
+		END LOOP;
+
+	*/
+
+
+	END;
+
+	EXECUTE FORMAT('
+	--Nu weer verder met drpotjes
+	DROP TABLE IF EXISTS %s;   
+	CREATE TABLE %s AS          
+
+
+	WITH
+
+		--Geeft niet overlappende geometrieen min geomtrien waarin geen panden zitten
+		plus_tot AS (
+		SELECT 
+		l0, l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, m0, m1, m2, k0, k1, k2, k3, k4, k5, k6,
+		(l0 + l1 + l2 + l3 + l4 + l5 + l6 + l7 + l8 + l9 + l10 + m0 + m1 + m2 + k0 + k1+ k2 + k3 + k4 + k5 + k6) AS tot,
+		geom AS lapjes
+
+		FROM %s
+		),
+
+		groeppeer as(
+
+		select
+		sum(e.L0) AS l0, sum(e.L1) AS l1, sum(e.l2) AS l2, sum(e.l3) AS l3, sum(e.l4) AS l4, sum(e.l5) AS l5, sum(e.l6) AS l6,
+		sum(e.l7) AS l7, sum(e.l8) AS l8, sum(e.l9) AS l9, sum(e.l10) AS l10, sum(e.m0) AS m0, sum(e.m1) AS m1, sum(e.m2) AS m2,
+		sum(e.k0) AS k0, sum(e.k1) AS k1, sum(e.k2) AS k2, sum(e.k3) AS k3, sum(e.k4) AS k4, sum(e.k5) AS k5, sum(e.k6) AS k6,
+		sum(e.tot) AS tot,
+		e.lapjes
+		from plus_tot e
+		group by e.lapjes
+
+		),
+
+		--Voegt aangrenzende lege lapjes samen en voegt de gecombineerde lege lap weer samen met een aangrenzend niet lege lap. Langs langste grenslijn. Kan ook min ipv max
+		tot_uni_lege_met_aangr AS (
+
+		SELECT
+		b.l0, b.l1, b.l2, b.l3, b.l4, b.l5, b.l6, b.l7, b.l8, b.l9, b.l10, b.m0, b.m1, b.m2, b.k0, b.k1, b.k2, b.k3, b.k4, b.k5, b.k6, b.tot,
+
+		--indien een lapje met meerdere lege aangrenst, deze bij elkaar optellen
+		st_union(b.combi) AS geom    
+		FROM
+			(
+			--Maak een uni van de lege geom met een aangrenzende lap die niet leeg is. Let op: een niet lege lap kan met meerdere lege aangrenzen
+			SELECT 
+			DISTINCT ON (leeg.geom)
+			a.l0, a.l1, a.l2, a.l3, a.l4, a.l5, a.l6, a.l7, a.l8, a.l9, a.l10, a.m0, a.m1, a.m2, a.k0, a.k1, a.k2, a.k3, a.k4, a.k5, a.k6, a.tot,
+			a.lapjes,
+			
+			leeg.geom,
+			st_union(leeg.geom, a.lapjes) AS combi,
+			max(st_length(st_intersection(leeg.geom, a.lapjes))) AS l --Langs de langste grenslijn samenvoegen
+			
+			FROM groeppeer a
+			JOIN 
+				(
+				--Voeg alle lege (tot=0) aangrenzende lapjes samen tot 1 geometrie
+				SELECT 
+				(ST_Dump(ST_Union(lapjes))).geom 
+				FROM groeppeer
+				WHERE tot = 0
+				) leeg
+			on st_length(st_intersection(leeg.geom, a.lapjes)) > 0
+
+			GROUP BY leeg.geom, a.lapjes , a.l0, a.l1, a.l2, a.l3, a.l4, a.l5, a.l6, a.l7, a.l8, a.l9, a.l10, a.m0, a.m1, a.m2, a.k0, a.k1, a.k2, a.k3, a.k4, a.k5, a.k6, a.tot
+			order by leeg.geom, l desc
+			) b
+
+		GROUP BY b.lapjes, b.l0, b.l1, b.l2, b.l3, b.l4, b.l5, b.l6, b.l7, b.l8, b.l9, b.l10, b.m0, b.m1, b.m2, b.k0, b.k1, b.k2, b.k3, b.k4, b.k5, b.k6, b.tot
+		),
+
+
+		rest_tot AS( 
+		SELECT
+
+		b.l0, b.l1, b.l2, b.l3, b.l4, b.l5, b.l6, b.l7, b.l8, b.l9, b.l10, b.m0, b.m1, b.m2, b.k0, b.k1, b.k2, b.k3, b.k4, b.k5, b.k6, b.tot,
+		b.lapjes AS geom
+
+		FROM groeppeer b
+		LEFT JOIN tot_uni_lege_met_aangr aan
+
+		on st_area(st_intersection(b.lapjes, aan.geom)) > 0
+		WHERE aan.geom IS NULL
+		),
+
+
+		een_hoop AS (
+		SELECT
+		ROW_NUMBER () OVER (ORDER BY geom) AS id,
+		a.*
+		FROM 
+			(
+			SELECT * FROM tot_uni_lege_met_aangr
+			UNION
+			SELECT * FROM rest_tot
+			) a
+		)
+
+
+	SELECT * FROM een_hoop;
+
+	ALTER TABLE %s ADD PRIMARY KEY (id);         
+
+	', tabel_naam, tabel_naam, drpotjes, tabel_naam);
+
+--END LOOP;
+
+END;
+
+$$
+LANGUAGE 'plpgsql';
